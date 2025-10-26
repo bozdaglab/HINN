@@ -16,6 +16,7 @@ import keras
 from keras.models import Model
 from keras.layers import Input, Dense, Dropout, BatchNormalization, Concatenate
 from keras import regularizers
+from keras.optimizers import Adam
 from keras.utils import plot_model
 
 from captum.attr import DeepLift
@@ -41,15 +42,18 @@ def load_and_process_data():
     expression = preprocess("~/gene_data.csv", "expression")
     methy = preprocess("~/methyl_data.csv", "methy")
     snp = preprocess("~/snp_data.csv", "snp")
-    demograph = pd.read_csv("~/demo_label_data.csv", usecols=range(7))
-    demograph.index = demograph.iloc[:, 0]
-    demograph = demograph.drop(demograph.columns[0], axis=1)
+    
+    # Read the demographic and label file
+    demo_label_df = pd.read_csv("~/demo_label_data.csv")
+    demo_label_df.index = demo_label_df.iloc[:, 0]
+    demo_label_df = demo_label_df.drop(demo_label_df.columns[0], axis=1)
+    
+    # Split into demographic (first 6 columns) and label (7th column which is index 6)
+    demograph = demo_label_df.iloc[:, :6].copy()
     demograph.columns = [f"{col}_demograph" for col in demograph.columns]
-
-    label = pd.read_csv("~/demo_label_data.csv", usecols=[0, 7])
-    label.index = label.iloc[:, 0]
-    label = label.drop(label.columns[0], axis=1)
-    label.columns = [f"{col}_label" for col in label.columns]
+    
+    label = demo_label_df.iloc[:, 6:7].copy()
+    label.columns = ['MMSE_label']
 
     data = pd.concat([snp, expression, methy, demograph, label], axis=1)
     return data
@@ -284,35 +288,55 @@ def plot_sankey(subset_methy_matrix, subset_gene_matrix, subset_pathway_matrix):
 
 def main():
     data = load_and_process_data()
-    X = data.drop(columns=[col for col in data.columns if col.endswith('MMSE_label') == False])
+    X = data.drop(columns=[col for col in data.columns if col.endswith('_label')])
     y = data['MMSE_label']
-    X_train_df, X_test_df, y_train, y_test = train_test_split(X, y, test_size=0.3)
+    
+    # Split data into train, validation, and test sets
+    X_train_df, X_temp_df, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+    X_val_df, X_test_df, y_val, y_test = train_test_split(X_temp_df, y_temp, test_size=0.5, random_state=42)
 
-    X_train_snp = X_train_df.filter(like='_snp').values
-    X_train_methy = X_train_df.filter(like='_methy').values
-    X_train_exp = X_train_df.filter(like='_expression').values
-    X_train_demo = X_train_df.filter(like='_demograph').values
+    # Extract features for each modality - TRAIN
+    X_train_snp = X_train_df.filter(like='_snp').values.astype(np.float32)
+    X_train_methy = X_train_df.filter(like='_methy').values.astype(np.float32)
+    X_train_exp = X_train_df.filter(like='_expression').values.astype(np.float32)
+    X_train_demo = X_train_df.filter(like='_demograph').values.astype(np.float32)
 
-    X_test_snp = X_test_df.filter(like='_snp').values
-    X_test_methy = X_test_df.filter(like='_methy').values
-    X_test_exp = X_test_df.filter(like='_expression').values
-    X_test_demo = X_test_df.filter(like='_demograph').values
+    # Extract features for each modality - VALIDATION
+    X_val_snp = X_val_df.filter(like='_snp').values.astype(np.float32)
+    X_val_methy = X_val_df.filter(like='_methy').values.astype(np.float32)
+    X_val_exp = X_val_df.filter(like='_expression').values.astype(np.float32)
+    X_val_demo = X_val_df.filter(like='_demograph').values.astype(np.float32)
 
-    X_train_list = [torch.tensor(X_train_snp), torch.tensor(X_train_methy), torch.tensor(X_train_exp), torch.tensor(X_train_demo)]
-    X_test_list = [torch.tensor(X_test_snp), torch.tensor(X_test_methy), torch.tensor(X_test_exp), torch.tensor(X_test_demo)]
+    # Extract features for each modality - TEST
+    X_test_snp = X_test_df.filter(like='_snp').values.astype(np.float32)
+    X_test_methy = X_test_df.filter(like='_methy').values.astype(np.float32)
+    X_test_exp = X_test_df.filter(like='_expression').values.astype(np.float32)
+    X_test_demo = X_test_df.filter(like='_demograph').values.astype(np.float32)
 
+    # Create lists for Keras
+    X_train_list = [X_train_snp, X_train_methy, X_train_exp, X_train_demo]
+    X_val_list = [X_val_snp, X_val_methy, X_val_exp, X_val_demo]
+    X_test_list = [X_test_snp, X_test_methy, X_test_exp, X_test_demo]
+
+    # Convert y to numpy arrays
+    y_train = y_train.values.astype(np.float32)
+    y_val = y_val.values.astype(np.float32)
+    y_test = y_test.values.astype(np.float32)
+
+    # Load sparse matrices
     sparse_methy = pd.read_csv("~/snp_methyl_matrix.csv", index_col=0)
-    sparse_gene = pd.read_csv("~/methyl_gene_matrix.csv".zip", compression='zip', index_col=0)
+    sparse_gene = pd.read_csv("~/methyl_gene_matrix.csv.zip", compression='zip', index_col=0)
     sparse_pathway = pd.read_csv("~/gene_pathway_matrix.csv", index_col=0)
+    
     sparse_methy_tensor = torch.tensor(sparse_methy.values, dtype=torch.float32)
     sparse_gene_tensor = torch.tensor(sparse_gene.values, dtype=torch.float32)
     sparse_pathway_tensor = torch.tensor(sparse_pathway.values, dtype=torch.float32)
 
     # Define input layers for SNP, methylation, expression, and demographic data
-    input_first_layer = Input(shape=X_train_snp.shape[1])
-    input_second_layer = Input(shape=X_train_methy.shape[1])
-    input_third_layer = Input(shape=X_train_exp.shape[1])
-    input_fourth_layer = Input(shape=X_train_demo.shape[1])
+    input_first_layer = Input(shape=(X_train_snp.shape[1],))
+    input_second_layer = Input(shape=(X_train_methy.shape[1],))
+    input_third_layer = Input(shape=(X_train_exp.shape[1],))
+    input_fourth_layer = Input(shape=(X_train_demo.shape[1],))
 
     # Define missing config parameters
     activation_function = 'sigmoid'
@@ -330,7 +354,7 @@ def main():
                                        mask=sparse_methy_tensor)(input_first_layer)
 
     secondary_output = SecondaryInputLayer(units=X_train_methy.shape[1])(input_second_layer)
-    multiplication_result_1 = tf.multiply(primary_output, secondary_output)
+    multiplication_result_1 = keras.ops.multiply(primary_output, secondary_output)
     multiplication_output = MultiplicationInputLayer(units=X_train_methy.shape[1], activation=activation_function)(multiplication_result_1)
 
     con_cat_layer_first = Dense(units=20, bias_initializer='zeros', activation=activation_function)(input_first_layer)
@@ -338,13 +362,13 @@ def main():
 
     second_output = PrimaryInputLayer(units=X_train_methy.shape[1], output_dim=X_train_exp.shape[1], activation=activation_function, mask=sparse_gene_tensor)(multiplication_output)
     third_output = SecondaryInputLayer(units=X_train_exp.shape[1])(input_third_layer)
-    division_result_1 = tf.divide(third_output, second_output)
+    division_result_1 = keras.ops.divide(third_output, second_output + 1e-7)
     division_output = MultiplicationInputLayer(units=X_train_exp.shape[1], activation=activation_function)(division_result_1)
 
     con_cat_layer_sec = Dense(units=20, bias_initializer='zeros', activation=activation_function)(output_2)
     output_3 = Concatenate()([division_output, con_cat_layer_sec])
 
-    fourth_output = PrimaryInputLayer(units=X_train_exp.shape[1], output_dim=sparse_pathway_new.shape[1], activation=activation_function, mask=sparse_pathway_tensor)(division_output)
+    fourth_output = PrimaryInputLayer(units=X_train_exp.shape[1], output_dim=sparse_pathway.shape[1], activation=activation_function, mask=sparse_pathway_tensor)(division_output)
     con_cat_layer_third = Dense(units=20, bias_initializer='zeros', activation=activation_function)(output_3)
     output_4 = Concatenate()([fourth_output, con_cat_layer_third])
 
@@ -384,7 +408,7 @@ def main():
     model = Model(inputs=[input_first_layer, input_second_layer, input_third_layer, input_fourth_layer], outputs=outputs, name="HINN")
     model.compile(loss='mae', optimizer=Adam(learning_rate=0.001), metrics=['mae'])
 
-    train_model(X_train_list, y_train, X_test_list, y_test, model)
+    train_model(X_train_list, y_train, X_val_list, y_val, model)
     results = evaluate_model(model, X_test_list, y_test)
     print("MAE (Test):", results['mae'])
     print("MSE (Test):", results['mse'])
