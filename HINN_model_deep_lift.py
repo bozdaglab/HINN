@@ -582,8 +582,7 @@ class HINN(nn.Module):
 # ---------------------------
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Using device:", device)
+    device = "cpu"
 
     # ---------------------------
     # Data & splits
